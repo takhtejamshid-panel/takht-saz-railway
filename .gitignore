@@ -4,3 +4,4 @@ dist/
 *.log
 .DS_Store
 env.d.ts
+.webhook_secret.txt

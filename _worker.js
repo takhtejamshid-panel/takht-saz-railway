@@ -28,20 +28,23 @@ const TELEGRAM_API = 'https://api.telegram.org/bot';
 const RAILWAY_API = 'https://backboard.railway.com/graphql/v2';
 
 // ---------------------------------------------------------------------------
-// متغیرهای محیطی (با تنصیص از طریق wrangler/داشبورد)
-//   در Workers متغیرهای محیطی روی globalThis قرار دارند.
+// متغیرهای محیطی — در Workerِ ماژولار از طریق پارامترِ env (در fetch) می‌آیند.
+//   این توابع فقط مقادیرِ پیکربندی (نهSecret) را برمی‌گردانند.
 // ---------------------------------------------------------------------------
-function env(k, d) {
-  try { return globalThis[k] !== undefined ? globalThis[k] : d; }
+function env(k, d, envObj) {
+  try { return envObj && envObj[k] !== undefined && envObj[k] !== null ? envObj[k] : d; }
   catch (e) { return d; }
 }
-const REPO        = env('RAILWAY_REPO', 'takhtejamshid-panel/takht-e-jamshid-backend');
-const BRANCH      = env('RAILWAY_BRANCH', 'main');
-const SRV_PREFIX  = env('RAILWAY_SERVICE_PREFIX', 'takht-panel');
-const DOMAIN_SUF  = env('RAILWAY_DOMAIN_SUFFIX', 'up.railway.app');
-const MAX_PER_H   = parseInt(env('MAX_DEPLOYS_PER_HOUR', '3'), 10) || 3;
-const MAX_GLOBAL  = parseInt(env('MAX_GLOBAL_PER_HOUR', '40'), 10) || 40;
-const WATCH_SECS  = parseInt(env('WATCH_SECONDS', '120'), 10) || 120; // زمانِ انتظار برای آماده‌شدنِ استقرار
+function cfg(envObj) {
+  return {
+    repo: env('RAILWAY_REPO', 'takhtejamshid-panel/takht-e-jamshid-backend', envObj),
+    branch: env('RAILWAY_BRANCH', 'main', envObj),
+    prefix: env('RAILWAY_SERVICE_PREFIX', 'takht-panel', envObj),
+    domSuf: env('RAILWAY_DOMAIN_SUFFIX', 'up.railway.app', envObj),
+    maxPerH: parseInt(env('MAX_DEPLOYS_PER_HOUR', '3', envObj), 10) || 3,
+    maxGlobal: parseInt(env('MAX_GLOBAL_PER_HOUR', '40', envObj), 10) || 40,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // ابزارهای کمکی
@@ -82,15 +85,14 @@ async function gql(token, query, variables) {
 // محدودیتِ نرخ (ساده با KV)
 // ---------------------------------------------------------------------------
 const hourKey = () => { const d = new Date(); return d.toISOString().slice(0, 13); };
-async function checkRate(uid) {
-  const kv = globalThis.KV;
+async function checkRate(kv, uid, maxPerH, maxGlobal) {
   if (!kv) return { ok: true };
   const h = hourKey();
   const uK = 'rate:' + h + ':u:' + uid, gK = 'rate:' + h + ':g';
   const [uRaw, gRaw] = await Promise.all([kv.get(uK).then(v => v || '0'), kv.get(gK).then(v => v || '0')]);
   const u = +uRaw, g = +gRaw;
-  if (u >= MAX_PER_H) return { ok: false, msg: 'در یک ساعت بیش از ' + MAX_PER_H + ' پنل نمی‌توانی بسازی. کمی صبر کن.' };
-  if (g >= MAX_GLOBAL) return { ok: false, msg: 'سهمیه‌ی بات در این ساعت پر شده؛ بعداً تلاش کن.' };
+  if (u >= maxPerH) return { ok: false, msg: 'در یک ساعت بیش از ' + maxPerH + ' پنل نمی‌توانی بسازی. کمی صبر کن.' };
+  if (g >= maxGlobal) return { ok: false, msg: 'سهمیه‌ی بات در این ساعت پر شده؛ بعداً تلاش کن.' };
   await Promise.all([kv.put(uK, String(u + 1), { expirationTtl: 3600 }), kv.put(gK, String(g + 1), { expirationTtl: 3600 })]);
   return { ok: true };
 }
@@ -98,7 +100,7 @@ async function checkRate(uid) {
 // ---------------------------------------------------------------------------
 // ساختِ پنل روی ریلیو
 // ---------------------------------------------------------------------------
-async function provision(userToken, chatId, tgToken) {
+async function provision(userToken, chatId, tgToken, cf) {
   // 0) اعتبارسنجیِ توکن و گرفتنِ هویتِ صاحب
   const me = await gql(userToken, 'query { me { id name email } }', {});
   const user = me.me || {};
@@ -132,10 +134,10 @@ async function provision(userToken, chatId, tgToken) {
   await sendMsg(tgToken, chatId, '📦 گروهِ ساخته شد؛ در حالِ اتصال به مخزنِ پنل…');
 
   // 3) ساختِ سرویس از مخزِنِ گیت‌هاب (public repo)
-  const srvName = SRV_PREFIX + '-' + Math.random().toString(36).slice(2, 6);
+  const srvName = cf.prefix + '-' + Math.random().toString(36).slice(2, 6);
   const sv = await gql(userToken,
     `mutation($s:ServiceCreateInput!){ serviceCreate(input:$s){ id name } }`,
-    { s: { name: srvName, projectId, environmentId, source: { repo: REPO }, branch: BRANCH } });
+    { s: { name: srvName, projectId, environmentId, source: { repo: cf.repo }, branch: cf.branch } });
   const serviceId = sv.serviceCreate && sv.serviceCreate.id;
   if (!serviceId) throw new Error('ساختِ سرویس ناموفق بود.');
 
@@ -168,7 +170,7 @@ async function provision(userToken, chatId, tgToken) {
 
   return {
     projectId, projectName: projName, environmentId, serviceId, deployId, domain,
-    email: email, hostname: (domain || projName + '.' + DOMAIN_SUF),
+    email: email, hostname: (domain || projName + '.' + cf.domSuf),
   };
 }
 
@@ -187,7 +189,7 @@ async function deliverPanel(info, tgToken, chatId) {
 // ---------------------------------------------------------------------------
 // پردازشِ پیام‌های تلگرام
 // ---------------------------------------------------------------------------
-async function handleMessage(token, msg) {
+async function handleMessage(token, msg, envObj) {
   const chatId = msg.chat.id;
   const text = (msg.text || '').trim();
   const from = msg.from;
@@ -233,12 +235,13 @@ async function handleMessage(token, msg) {
   const m = text.match(/(token_[A-Za-z0-9\-_]{6,})/i);
   if (m) {
     const userToken = cleanToken(m[1]);
-    const rate = await checkRate(uid);
+    const cf = cfg(envObj);
+    const rate = await checkRate(envObj.KV, uid, cf.maxPerH, cf.maxGlobal);
     if (!rate.ok) return sendMsg(token, chatId, '⛔ ' + rate.msg);
 
     await sendMsg(token, chatId, '⚙️ شروعِ ساختِ پنل… (۱ تا ۵ دقیقه)');
     try {
-      const info = await provision(userToken, chatId, token);
+      const info = await provision(userToken, chatId, token, cf);
       await deliverPanel(info, token, chatId);
     } catch (e) {
       await sendMsg(token, chatId, '❌ <b>خطا در ساختِ پنل</b>\n\n' + (e.message || 'نامشخص') +
@@ -256,28 +259,28 @@ async function handleMessage(token, msg) {
 // ---------------------------------------------------------------------------
 // روتر
 // ---------------------------------------------------------------------------
-async function handleRequest(request) {
+async function handleRequest(request, envObj) {
   const url = new URL(request.url);
+  const TELEGRAM_TOKEN = envObj.TELEGRAM_TOKEN || '';
+  const WEBHOOK_SECRET = env('WEBHOOK_SECRET', 'tj', envObj);
 
   if (url.pathname === '/health') return json({ ok: true, name: BOT_NAME, version: VERSION });
   if (url.pathname === '/') return json({ ok: true, message: 'تخت‌ساز Railway در حال اجراست. مسیرِ وب‌هوک: /tg/<secret>' });
 
   // راه‌اندازیِ وب‌هوک (GET)
   if (url.pathname === '/setup' && request.method === 'GET') {
-    const secret = env('WEBHOOK_SECRET', 'tj');
-    const r = await tg(env('TELEGRAM_TOKEN', ''), 'setWebhook', {
-      url: url.origin + '/tg/' + secret, secret_token: secret, allowed_updates: ['message'],
+    const r = await tg(TELEGRAM_TOKEN, 'setWebhook', {
+      url: url.origin + '/tg/' + WEBHOOK_SECRET, secret_token: WEBHOOK_SECRET, allowed_updates: ['message'],
     });
     return json({ ok: !!(r && r.ok), result: r });
   }
 
   // وب‌هوکِ تلگرام
   if (url.pathname.startsWith('/tg/') && request.method === 'POST') {
-    const secret = env('WEBHOOK_SECRET', 'tj');
     const supplied = url.pathname.slice(4);
-    if (secret && supplied !== secret) return json({ ok: false }, 403);
+    if (WEBHOOK_SECRET && supplied !== WEBHOOK_SECRET) return json({ ok: false }, 403);
     const body = await request.json().catch(() => ({}));
-    if (body && body.message) await handleMessage(env('TELEGRAM_TOKEN', ''), body.message);
+    if (body && body.message) await handleMessage(TELEGRAM_TOKEN, body.message, envObj);
     return json({ ok: true }, 200);
   }
 
@@ -285,8 +288,8 @@ async function handleRequest(request) {
 }
 
 export default {
-  async fetch(request) {
-    try { return await handleRequest(request); }
+  async fetch(request, envObj, ctx) {
+    try { return await handleRequest(request, envObj); }
     catch (e) {
       console.error(e);
       return json({ ok: false, error: String(e && e.message || e) }, 500);
