@@ -1,0 +1,14 @@
+{
+  "name": "takht-saz-railway",
+  "version": "0.1.0",
+  "description": "بات تلگرامیِ لانچرِ خودکارِ پنل تخت جمشید روی Railway",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "build": "node build.js"
+  },
+  "devDependencies": {
+    "wrangler": "^3.0.0"
+  }
+}
