@@ -4,15 +4,16 @@
 
 **بات تلگرامیِ لانچرِ خودکارِ پنلِ «تخت جمشید» روی Railway**
 
-کاربر **توکنِ Account** ریلیو را به ربات می‌دهد؛ ربات روی حسابِ **خودِ کاربر**
-یک پنلِ FastAPI (تخت جمشید) می‌سازد و لینکِ آن را تحویل می‌دهد — بدون هیچ سرور، روی **Cloudflare Workers** رایگان.
+کاربر **توکنِ Account ریلیو** را به ربات می‌دهد؛ ربات روی حسابِ **خودِ کاربر**
+یک پنلِ FastAPI (تخت جمشید) می‌سازد و لینکِ آن را تحویل می‌دهد — **بدون هیچ سرور، روی Cloudflare Workers رایگان.**
 
 ```
-کاربر ──► تلگرام ──► Workerِ ربات (روی کلودفلرِ تو)
+کاربر ──► تلگرام ──► Workerِ ربات (روی کلودفلر)
                           │
-                          ├─ projectCreate      → ساختِ پروژه‌ی ریلیو
-                          ├─ serviceCreate(repo) → اتصال به پنلِ گیت‌هاب
-                          └─ serviceDomainCreate → دامنه‌ی عمومی
+                          ├─ query { me }               → اعتبارسنجیِ توکن
+                          ├─ projectCreate              → ساختِ پروژه‌ی ریلیو
+                          ├─ serviceCreate(repo)        → اتصال به پنلِ گیت‌هاب
+                          └─ serviceDomainCreate        → دامنه‌ی عمومی
                           │
                           └──▶ https://takht-xxxx.up.railway.app
 ```
@@ -26,92 +27,47 @@
 
 ---
 
-## ✨ قابلیت‌ها
+## ✅ وضعیت استقرار (شروع‌شده)
 
-- واکنش به `/start` و منویِ `🏛 شروع` / `📖 دریافت توکن` / `ℹ️ راهنما`
-- دریافتِ توکنِ ریلیو، اعتبارسنجیِ آن (`query me`) و نمایشِ صاحبِ حساب
-- ساختِ خودکار: پروژه → سرویس (از ریپو) → دامنه → آغازِ استقرار
-- تحویلِ لینکِ پنل + مشخصاتِ ورودِ پیش‌فرض
-- محدودیتِ نرخِ ساده برای محافظت از سهمیه (قابل تنظیم با `MAX_DEPLOYS_PER_HOUR` و `MAX_GLOBAL_PER_HOUR`)
-- مسیرِ راهنما `/setup` برای تنظیمِ خودکارِ Webhook
+- **نام Worker (Cloudflare):** `takht-saz-railway`
+- **آدرس Worker:** `https://takht-saz-railway.amirhesamfathalian7.workers.dev`
+- **بات تلگرام:** `@takhtejamshidlanuncherrbot`
+- **Webhook:** تنظیم‌شده و فعال (مسیرِ `/tg/<secret>` سفارشی)
+- **KV:** `KV` (Binding) با id در `wrangler.toml`
 
 ---
 
-## 🚀 راه‌اندازی قدم‌به‌قدم (از صفر)
+## ✨ امکانات
 
-> سه پیش‌نیاز لازم است: **(۱)** توکنِ تلگرام، **(۲)** یک Worker + KV روی کلودفلر، **(۳)** استقرار و اتصالِ Webhook.
-
-### قدم ۱ — ساختِ رباتِ تلگرام (توکنِ بات)
-
-1. در تلگرام به **[@BotFather](https://t.me/BotFather)** پیام بده.
-2. دستور `/newbot` را بفرست.
-3. یک نام و سپس یک نام‌کاربری (پسوند `bot`) بده.
-4. BotFather یک **توکن** به شکل `123456789:AA...` می‌دهد. آن را کپی کن. ← این `TELEGRAM_TOKEN` است.
-
-### قدم ۲ — راه‌اندازیِ ابزارِ استقرار (Wrangler)
-
-ترمینال را باز کن و:
-
-```bash
-npm install -g wrangler
-wrangler login        # یا به‌جای آن از API Token استفاده کن (مرحله‌ی بعد)
-```
-
-### قدم ۳ — تنظیمِ توکن و KV
-
-```bash
-cd takht-e-jamshid-launcher-rw
-
-# ۱) ایجادِ KV و جای‌گذاریِ id در wrangler.toml
-npx wrangler kv namespace create KV
-#    خروجی شامل یک id است؛ آن را در خطِ «id = ...» در wrangler.toml بگذار.
-```
-
-### قدم ۴ — تنظیمِ رازها (Secrets)
-
-```bash
-npx wrangler secret put TELEGRAM_TOKEN
-#    توکنِ BotFather را وارد کن
-
-npx wrangler secret put WEBHOOK_SECRET
-#    یک رشته‌ی تصادفی (مثلاً tj-سرّی) — برای امنیتِ Webhook
-```
-
-### قدم ۵ — استقرار
-
-```bash
-npx wrangler deploy
-```
-
-شماره‌ی Worker را یادداشت کن (مثلاً `https://takht-saz-railway.<your-subdomain>.workers.dev`).
-
-### قدم ۶ — اتصالِ Webhook
-
-در مرورگر باز کن:
-
-```
-https://takht-saz-railway.<sub>.workers.dev/setup
-```
-
-باید پاسخ `{"ok":true,...}` بگیرد. حالا به ربات در تلگرام `/start` بده.
+- واکنش به `/start`، `/help` و منویِ `🏛 شروع` / `📖 دریافت توکن` / `ℹ️ راهنما`
+- دریافتِ توکنِ ریلیو، اعتبارسنجیِ آن (`query me`) و نمایشِ صاحبِ حساب
+- ساختِ خودکار: پروژه → سرویس → دامنه → آغازِ استقرار
+- تحویلِ لینکِ پنل + مشخصاتِ ورودِ پیش‌فرض
+- محدودیتِ نرخِ ساده (`MAX_DEPLOYS_PER_HOUR` = ۳، `MAX_GLOBAL_PER_HOUR` = ۴۰) برای محافظت از سهمیه
+- مسیرِ راهنما `/setup` برای اتصالِ خودکارِ Webhook
 
 ---
 
 ## 🎯 استفاده (برای کاربرِ نهایی)
 
-1. `/start` بزن یا `🏛 شروع` را لمس کن.
-2. توکنِ ریلیوِ خودت (`token_...`) را بفرست.
+1. با `@takhtejamshidlanuncherrbot` شروع کن (یک `/start` بزن).
+2. توکنِ ریلیوی خودت (`token_...`) را بفرست.
 3. ربات چند پیامِ پیشرفت می‌فرستد و در پایان لینکِ پنل را می‌دهد.
-4. آدرسِ پنل را باز کن؛ با `admin / admin123` وارد شو و حتماً رمز را تغییر بده.
+4. آدرس را باز کن؛ با `admin / admin123` وارد شو و حتماً رمز را در «تنظیمات» تغییر بده.
+5. در پایان، توکنِ ریلیوی خودت را از [railway.com/account/tokens](https://railway.com/account/tokens) **باطل (revoke)** کن.
 
 ---
 
-## 🔐 نکته‌های امنیتی (مهم)
+## 🚀 استقرار (برای توسعه‌دهنده)
 
-- توکنِ ریلیو از **سرورهای تلگرام** عبور می‌کند و سپس به Workerِ تو می‌رسد؛ پس در انتهای کار به کاربر بگو توکنش را **باطل (revoke)** کند.
-- در `wrangler.toml` **هرگز** توکن را ننویس؛ همیشه از `wrangler secret put` استفاده کن.
-- صورتِ پروژه‌ی پنل باید **Public** باشد تا از طریقِ API ریلیو قابلِ اتصال باشد (ریپازیتوریِ `takht-e-jamshid-backend` این‌طور است).
-- فایلِ `_worker.js` را به‌صورتِ `export default` و یک‌فایلِ کامل نوشته‌ایم؛ `build.js` فقط بررسیِ سینتکس است.
+```bash
+npm install            # نصب wrangler
+npx wrangler kv namespace create KV    # → id را در wrangler.toml بگذار
+npx wrangler secret put TELEGRAM_TOKEN   # توکنِ BotFather
+npx wrangler secret put WEBHOOK_SECRET   # یک رشته‌ی تصادفی (اختیاری)
+npx wrangler deploy
+# سپس در مرورگر:  https://<worker>.workers.dev/setup  تا Webhook وصل شود
+```
 
 ---
 
@@ -119,12 +75,21 @@ https://takht-saz-railway.<sub>.workers.dev/setup
 
 ```
 takht-e-jamshid-launcher-rw/
-├── _worker.js      # باتِ کامل (Webhook تلگرام + GraphQL ریلیو)
-├── wrangler.toml   # پیکربندیِ کلودفلر
-├── package.json
+├── _worker.js      # باتِ کامل (Webhook تلگرام + GraphQL ریلیو) — یک فایل، export default
+├── wrangler.toml   # پیکربندیِ کلودفلر (name, main, KV id, vars)
+├── package.json    # اسکریپت‌های dev/deploy/build
 ├── build.js        # بررسیِ سینتکس
 └── README.md
 ```
+
+---
+
+## ⚠️ نکته‌های فنی و امنیتی
+
+- **Workers ماژولار:** بایندینگ‌ها (توکن‌ها و KV) از طریقِ پارامترِ `env` در `fetch(request, env, ctx)` خوانده می‌شوند، نه `globalThis`.
+- **توکن‌ها در هیچ فایلی ذخیره نمی‌شوند**؛ فقط در Secret های کلودفلر و از طریقِ `wrangler secret put`.
+- ریپازیتوریِ پنل (`takht-e-jamshid-backend`) باید **Public** باشد تا از طریقِ API ریلیو قابلِ اتصال باشد — که هست.
+- برای ساختِ سرویس در ریلیو به **Account Token** نیاز است، نه Project Token.
 
 ---
 
