@@ -68,6 +68,18 @@ function cleanToken(raw) {
   return t.replace(/[\s"'`]/g, '');
 }
 
+// تشخیصِ توکنِ ریلیو از متن:
+//   ریلیو به دو شکلی توکن می‌دهد:  (۱) با پیشوندِ token_   (۲) به‌شکلِ UUID
+function extractRailwayToken(text) {
+  // (۱) فرمتِ token_xxxx
+  let m = text.match(/(token_[A-Za-z0-9\-_]{6,})/i);
+  if (m) return cleanToken(m[1]);
+  // (۲) فرمتِ UUID (مثال: 17c1aec5-af89-4b03-ae00-367952bed648)
+  m = text.match(/\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/);
+  if (m) return m[0];
+  return null;
+}
+
 // GraphQL با توکنِ ریلیو
 async function gql(token, query, variables) {
   const res = await fetch(RAILWAY_API, {
@@ -101,20 +113,22 @@ async function checkRate(kv, uid, maxPerH, maxGlobal) {
 // ساختِ پنل روی ریلیو
 // ---------------------------------------------------------------------------
 async function provision(userToken, chatId, tgToken, cf) {
-  // 0) اعتبارسنجیِ توکن و گرفتنِ هویتِ صاحب
-  const me = await gql(userToken, 'query { me { id name email } }', {});
+  // 0) اعتبارسنجیِ توکن و گرفتنِ هویتِ صاحب + workspace
+  const me = await gql(userToken, 'query { me { id name email workspaces { id name } } }', {});
   const user = me.me || {};
   const email = user.email || (user.name || 'کاربر');
+  const ws = (user.workspaces && user.workspaces[0]) || {};
+  const workspaceId = ws.id;
 
   await sendMsg(tgToken, chatId, '👤 توکن معتبر است — صاحبِ حساب: <code>' + (email) + '</code>\n⚙️ در حالِ ساختِ پروژه…');
 
-  // 1) ساختِ پروژه
+  // 1) ساختِ پروژه (در ریلیویِ جدید workspaceId الزامی است)
   const projName = 'takht-' + Math.random().toString(36).slice(2, 8);
   const pj = await gql(userToken,
-    'mutation($name:String!){ projectCreate(input:{ name:$name }){ id name } }',
-    { name: projName });
+    'mutation($name:String!,$wid:String!){ projectCreate(input:{ name:$name, workspaceId:$wid }){ id name } }',
+    { name: projName, wid: workspaceId });
   const projectId = pj.projectCreate && pj.projectCreate.id;
-  if (!projectId) throw new Error('ساختِ پروژه ناموفق بود.');
+  if (!projectId) throw new Error('ساختِ پروژه ناموفق بود (شاید سقفِ پلنِ رایگان پر شده باشد).');
 
   // 2) یافتنِ محیطِ production (پیش‌فرضِ پروژه‌ی جدید: production)
   const envQ = await gql(userToken,
@@ -200,7 +214,7 @@ async function handleMessage(token, msg, envObj) {
     return sendMsg(token, chatId,
       '🏛 <b>' + BOT_NAME + '</b>\n\n' +
       'این ربات با گرفتنِ <b>Account Token</b> ریلیو، روی حسابِ <b>خودِ تو</b> یک پنلِ «تخت جمشید» (FastAPI) می‌سازد و لینکِ آن را می‌دهد.\n\n' +
-      '👇 برای شروع، توکنِ ریلیو را همین‌جا بفرست:\n<code>token_xxxxxxxx</code>\n\n' +
+      '👇 برای شروع، توکنِ ریلیو را همین‌جا بفرست:\n<code>token_xxxxxxxx</code> یا <code>uuid</code>\n\n' +
       '🔒 توکن فقط برای ساختِ پنل استفاده می‌شود و در هیچ‌جا ذخیره نمی‌گردد.',
       [['🏛 شروع'], ['📖 دریافت توکن'], ['ℹ️ راهنما']]);
   }
@@ -213,7 +227,7 @@ async function handleMessage(token, msg, envObj) {
       '۳. دکمه‌ی <b>New Token</b> را بزن.\n' +
       '۴. در کادرِ «Workspace» <b>No workspace</b> را انتخاب کن (این نکته‌ی کلیدی است!).\n' +
       '۵. یک نام بگذار (مثلاً takht-saz) و Create.\n' +
-      '۶. توکنِ ساخته‌شده که با <code>token_</code> شروع می‌شود را کپی و برایم بفرست.\n\n' +
+      '۶. توکنِ ساخته‌شده را کپی و برایم بفرست.\n\u200e   توجه: تازه‌ترین نسخه‌ی ریلیو توکن را به‌شکلِ <code>UUID</code> می‌دهد (مثل <code>17c1aec5-…</code>) — همین را بفرست، ربات می‌فهمد.\n\n' +
       '⚠️ این توکن فقط یک‌بار نمایش داده می‌شود؛ همان‌جا کپی‌اش کن.',
       [['🏛 شروع']]);
   }
@@ -231,10 +245,9 @@ async function handleMessage(token, msg, envObj) {
       [['🏛 شروع']]);
   }
 
-  // تشخیصِ توکنِ ریلیو در متن
-  const m = text.match(/(token_[A-Za-z0-9\-_]{6,})/i);
-  if (m) {
-    const userToken = cleanToken(m[1]);
+  // تشخیصِ توکنِ ریلیو در متن (هر دو فرمتِ token_ و UUID)
+  const userToken = extractRailwayToken(text);
+  if (userToken) {
     const cf = cfg(envObj);
     const rate = await checkRate(envObj.KV, uid, cf.maxPerH, cf.maxGlobal);
     if (!rate.ok) return sendMsg(token, chatId, '⛔ ' + rate.msg);
@@ -245,7 +258,7 @@ async function handleMessage(token, msg, envObj) {
       await deliverPanel(info, token, chatId);
     } catch (e) {
       await sendMsg(token, chatId, '❌ <b>خطا در ساختِ پنل</b>\n\n' + (e.message || 'نامشخص') +
-        '\n\nمطمئن شو که توکن، <b>Account Token</b> (<code>token_...</code>) باشد و حسابِ تو دسترسیِ کافی دارد.',
+        '\n\nمطمئن شو که توکن، <b>Account Token</b> ریلیو باشد (فرمت <code>token_</code> یا <code>UUID</code>) و حسابِ تو دسترسیِ کافی دارد.',
         [['🏛 شروع'], ['📖 دریافت توکن']]);
     }
     return;
