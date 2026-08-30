@@ -1,299 +1,279 @@
 /* =============================================================================
- *  تخت‌ساز Railway | TAKHT-SAZ RAILWAY
+ *  تخت‌ساز Railway | TAKHT-SAZ RAILWAY  v0.2.0
  *  بات تلگرامیِ لانچرِ خودکارِ پنلِ «تخت جمشید» روی Railway
- *  نسخه 0.1.0
  *
- *  کاربر توکنِ Account Token ریلیو (token_...) را می‌فرستد؛
- *  بات به‌صورتِ خودکار روی حسابِ خودِ کاربر: پروژه + سرویس + دامنه می‌سازد،
- *  استقرار را آغاز می‌کند و در پایان لینکِ پنل را تحویل می‌دهد.
+ *  معماری (step-driven):
+ *    ──/start────► منو (دکمه‌ی قابلاستفاده)
+ *    ─توکن──► اعتبارسنجی (query me + workspaces) ► ساختِ پروژه/سرویس/دامنه ► آغازِ استقرار
+ *    ─"بررسی وضعیت"──► پولِ deployment(status) و تحویلِ لینکِ نهایی + QR
  *
- *  پیش‌نیازها:
- *    • یک Worker روی Cloudflare (پلن رایگان کافی است)
- *    • یک KV با Binding به نامِ دقیقِ KV
- *    • متغیرهای محیطی (رازها):
- *        TELEGRAM_TOKEN   → توکنِ رباتِ تلگرام (از BotFather)
- *        WEBHOOK_SECRET   → رازِ وب‌هوک (اختیاری، توصیه‌شده)
- *    • متغیرهای معمولی:
- *        RAILWAY_REPO, RAILWAY_BRANCH, etc. (اختیاری)
- *
- *  راه‌اندازی وب‌هوک:  GET  https://<worker>.workers.dev/setup
+ *  پیش‌نیاز: Worker + KV (binding به نام KV) + رازها:
+ *      TELEGRAM_TOKEN (secret) ، WEBHOOK_SECRET (اختیاری)
+ *  وب‌هوک: GET /setup
  * ============================================================================= */
 
-// ---------------------------------------------------------------------------
-// ثابت‌ها
-// ---------------------------------------------------------------------------
-const VERSION = '0.1.0';
+const VERSION = '0.2.0';
 const BOT_NAME = 'تخت‌ساز Railway';
 const TELEGRAM_API = 'https://api.telegram.org/bot';
 const RAILWAY_API = 'https://backboard.railway.com/graphql/v2';
+const QR_API = 'https://api.qrserver.com/v1/create-qr-code/?size=280x280&data=';
 
-// ---------------------------------------------------------------------------
-// متغیرهای محیطی — در Workerِ ماژولار از طریق پارامترِ env (در fetch) می‌آیند.
-//   این توابع فقط مقادیرِ پیکربندی (نهSecret) را برمی‌گردانند.
-// ---------------------------------------------------------------------------
-function env(k, d, envObj) {
-  try { return envObj && envObj[k] !== undefined && envObj[k] !== null ? envObj[k] : d; }
-  catch (e) { return d; }
-}
-function cfg(envObj) {
+// --- پیکربندی (از env) ---
+function env(k, d, e) { try { return e && e[k] !== undefined && e[k] !== null ? e[k] : d; } catch (_) { return d; } }
+function cfg(e) {
   return {
-    repo: env('RAILWAY_REPO', 'takhtejamshid-panel/takht-e-jamshid-backend', envObj),
-    branch: env('RAILWAY_BRANCH', 'main', envObj),
-    prefix: env('RAILWAY_SERVICE_PREFIX', 'takht-panel', envObj),
-    domSuf: env('RAILWAY_DOMAIN_SUFFIX', 'up.railway.app', envObj),
-    maxPerH: parseInt(env('MAX_DEPLOYS_PER_HOUR', '3', envObj), 10) || 3,
-    maxGlobal: parseInt(env('MAX_GLOBAL_PER_HOUR', '40', envObj), 10) || 40,
+    repo: env('RAILWAY_REPO', 'takhtejamshid-panel/takht-e-jamshid-backend', e),
+    branch: env('RAILWAY_BRANCH', 'main', e),
+    prefix: env('RAILWAY_SERVICE_PREFIX', 'takht-panel', e),
+    domSuf: env('RAILWAY_DOMAIN_SUFFIX', 'up.railway.app', e),
+    maxPerH: parseInt(env('MAX_DEPLOYS_PER_HOUR', '3', e), 10) || 3,
+    maxGlobal: parseInt(env('MAX_GLOBAL_PER_HOUR', '40', e), 10) || 40,
+    base: env('PANEL_BASE_URL', '', e),
   };
 }
 
-// ---------------------------------------------------------------------------
-// ابزارهای کمکی
-// ---------------------------------------------------------------------------
+// --- ابزارهای تلگرام ---
 const json = (o, s = 200) => new Response(JSON.stringify(o), { status: s, headers: { 'content-type': 'application/json; charset=utf-8' } });
-
 async function tg(token, method, body) {
-  const r = await fetch(TELEGRAM_API + token + '/' + method, {
-    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
-  });
+  const r = await fetch(TELEGRAM_API + token + '/' + method, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
   return r.json().catch(() => ({}));
 }
-const sendMsg = (t, c, text, kb) =>
-  tg(t, 'sendMessage', { chat_id: c, text, parse_mode: 'HTML', ...(kb ? { reply_markup: JSON.stringify({ keyboard: kb, resize_keyboard: true, one_time_keyboard: true }) } : {}) });
-const editMsg = (t, c, m, text) => tg(t, 'editMessageText', { chat_id: c, message_id: m, text, parse_mode: 'HTML' });
+const sendMsg = (t, c, text, kb) => tg(t, 'sendMessage', { chat_id: c, text, parse_mode: 'HTML' , ...(kb ? { reply_markup: kb } : {}) });
+const editMsg = (t, c, m, text, kb) => tg(t, 'editMessageText', { chat_id: c, message_id: m, text, parse_mode: 'HTML', ...(kb ? { reply_markup: kb } : {}) });
 
-// نرمالیزه‌کردنِ توکنِ ریلیو (حذفِ فاصله/افزودنِ "Bearer")
-function cleanToken(raw) {
-  let t = String(raw || '').trim();
-  if (t.startsWith('Bearer ')) t = t.slice(7);
-  return t.replace(/[\s"'`]/g, '');
-}
+// کیبوردهای قابلاستفاده (inline)
+const kb = {
+  main: { inline_keyboard: [
+    [{ text: '🏛 شروع', callback_data: 'start' }, { text: '📖 دریافت توکن', callback_data: 'guide' }],
+    [{ text: '🧪 بررسی وضعیت استقرار', callback_data: 'status' }, { text: 'ℹ️ راهنما', callback_data: 'help' }],
+  ]},
+  back: { inline_keyboard: [[{ text: '‹ بازگشت', callback_data: 'start' }]] },
+};
+const kbCancel = { inline_keyboard: [[{ text: '⬅ بازگشت به منو', callback_data: 'start' }]] };
 
-// تشخیصِ توکنِ ریلیو از متن:
-//   ریلیو به دو شکلی توکن می‌دهد:  (۱) با پیشوندِ token_   (۲) به‌شکلِ UUID
+// --- توکن ریلیو ---
+function cleanToken(raw) { let t = String(raw || '').trim(); if (t.startsWith('Bearer ')) t = t.slice(7); return t.replace(/[\s"'`]/g, ''); }
 function extractRailwayToken(text) {
-  // (۱) فرمتِ token_xxxx
-  let m = text.match(/(token_[A-Za-z0-9\-_]{6,})/i);
-  if (m) return cleanToken(m[1]);
-  // (۲) فرمتِ UUID (مثال: 17c1aec5-af89-4b03-ae00-367952bed648)
-  m = text.match(/\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/);
-  if (m) return m[0];
+  let m = text.match(/(token_[A-Za-z0-9\-_]{6,})/i); if (m) return cleanToken(m[1]);
+  m = text.match(/\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/); if (m) return m[0];
   return null;
 }
 
-// GraphQL با توکنِ ریلیو
+// --- GraphQL ریلیو ---
 async function gql(token, query, variables) {
-  const res = await fetch(RAILWAY_API, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json', 'authorization': 'Bearer ' + token },
-    body: JSON.stringify({ query, variables }),
-  });
+  const res = await fetch(RAILWAY_API, { method: 'POST', headers: { 'content-type': 'application/json', 'authorization': 'Bearer ' + token }, body: JSON.stringify({ query, variables }) });
   const txt = await res.text();
-  let d; try { d = JSON.parse(txt); } catch (e) { throw new Error('پاسخ نامعتبر از ریلیو: ' + txt.slice(0, 160)); }
-  if (d.errors && d.errors.length) throw new Error(d.errors[0].message || 'خطای API ریلیو');
+  let d; try { d = JSON.parse(txt); } catch (_) { throw new Error('پاسخ نامعتبر: ' + txt.slice(0, 120)); }
+  if (d.errors && d.errors.length) throw new Error(d.errors[0].message || 'خطا در API');
   return d.data || {};
 }
 
-// ---------------------------------------------------------------------------
-// محدودیتِ نرخ (ساده با KV)
-// ---------------------------------------------------------------------------
-const hourKey = () => { const d = new Date(); return d.toISOString().slice(0, 13); };
+// --- KV helpers ---
+const getK = (kv, k) => kv.get(k).then(v => v || null);
+const putK = (kv, k, v) => kv.put(k, v);
+
+// --- محدودیت نرخ ---
+const hourKey = () => new Date().toISOString().slice(0, 13);
 async function checkRate(kv, uid, maxPerH, maxGlobal) {
   if (!kv) return { ok: true };
-  const h = hourKey();
-  const uK = 'rate:' + h + ':u:' + uid, gK = 'rate:' + h + ':g';
-  const [uRaw, gRaw] = await Promise.all([kv.get(uK).then(v => v || '0'), kv.get(gK).then(v => v || '0')]);
-  const u = +uRaw, g = +gRaw;
-  if (u >= maxPerH) return { ok: false, msg: 'در یک ساعت بیش از ' + maxPerH + ' پنل نمی‌توانی بسازی. کمی صبر کن.' };
-  if (g >= maxGlobal) return { ok: false, msg: 'سهمیه‌ی بات در این ساعت پر شده؛ بعداً تلاش کن.' };
+  const h = hourKey(); const uK = 'rate:' + h + ':u:' + uid, gK = 'rate:' + h + ':g';
+  const [u, g] = await Promise.all([getK(kv, uK).then(v => +v || 0), getK(kv, gK).then(v => +v || 0)]);
+  if (u >= maxPerH) return { ok: false, msg: 'در یک ساعت بیش از ' + maxPerH + ' پنل نمی‌توانی بسازی.' };
+  if (g >= maxGlobal) return { ok: false, msg: 'سهمیه‌ی بات در این ساعت پر شده.' };
   await Promise.all([kv.put(uK, String(u + 1), { expirationTtl: 3600 }), kv.put(gK, String(g + 1), { expirationTtl: 3600 })]);
   return { ok: true };
 }
 
-// ---------------------------------------------------------------------------
-// ساختِ پنل روی ریلیو
-// ---------------------------------------------------------------------------
+// ===========================================================================
+//  بخشِ اصلی: ساختِ پنل روی ریلیو
+// ===========================================================================
 async function provision(userToken, chatId, tgToken, cf) {
-  // 0) اعتبارسنجیِ توکن و گرفتنِ هویتِ صاحب + workspace
-  const me = await gql(userToken, 'query { me { id name email workspaces { id name } } }', {});
+  // ۰) هویت + workspace
+  const me = await gql(userToken, 'query { me { id email name workspaces { id name } } }', {});
   const user = me.me || {};
-  const email = user.email || (user.name || 'کاربر');
+  const email = user.email || user.name || 'کاربر';
   const ws = (user.workspaces && user.workspaces[0]) || {};
   const workspaceId = ws.id;
 
-  await sendMsg(tgToken, chatId, '👤 توکن معتبر است — صاحبِ حساب: <code>' + (email) + '</code>\n⚙️ در حالِ ساختِ پروژه…');
+  await sendMsg(tgToken, chatId, '👤 توکن معتبر است — <code>' + email + '</code>\n⚙️ در حال ساختِ پروژه…');
 
-  // 1) ساختِ پروژه (در ریلیویِ جدید workspaceId الزامی است)
+  // ۱) ساخت پروژه
   const projName = 'takht-' + Math.random().toString(36).slice(2, 8);
-  const pj = await gql(userToken,
-    'mutation($name:String!,$wid:String!){ projectCreate(input:{ name:$name, workspaceId:$wid }){ id name } }',
-    { name: projName, wid: workspaceId });
+  const pj = await gql(userToken, 'mutation($name:String!,$wid:String!){ projectCreate(input:{ name:$name, workspaceId:$wid }){ id name } }', { name: projName, wid: workspaceId });
   const projectId = pj.projectCreate && pj.projectCreate.id;
-  if (!projectId) throw new Error('ساختِ پروژه ناموفق بود (شاید سقفِ پلنِ رایگان پر شده باشد).');
+  if (!projectId) throw new Error('ساخت پروژه ناموفق بود (شاید سقف پلن رایگان پر است یا workspace نادرست).');
 
-  // 2) یافتنِ محیطِ production (پیش‌فرضِ پروژه‌ی جدید: production)
-  const envQ = await gql(userToken,
-    `query($p:String!){ project(id:$p){ environments{ edges{ node{ id name } } } } }`, { p: projectId });
+  // ۲) محیط production
+  let envId = null;
+  const envQ = await gql(userToken, 'query($p:String!){ project(id:$p){ environments{ edges{ node{ id name } } } } }', { p: projectId });
   const envs = (envQ.project && envQ.project.environments && envQ.project.environments.edges) || [];
-  let envObj = envs.find(e => e.node.name === 'production') || envs[0];
-  if (!envObj) {
-    // ساختِ محیط اگر نبود
-    const ec = await gql(userToken,
-      'mutation($p:String!,$n:String!){ environmentCreate(input:{ projectId:$p, name:$n }){ id name } }',
-      { p: projectId, n: 'production' });
-    if (ec.environmentCreate) envObj = { node: { id: ec.environmentCreate.id, name: 'production' } };
+  const eObj = envs.find(x => x.node.name === 'production') || envs[0];
+  if (eObj) envId = eObj.node.id;
+  else {
+    const ec = await gql(userToken, 'mutation($p:String!,$n:String!){ environmentCreate(input:{ projectId:$p, name:$n }){ id name } }', { p: projectId, n: 'production' });
+    envId = ec.environmentCreate && ec.environmentCreate.id;
   }
-  const environmentId = envObj && envObj.node.id;
-  if (!environmentId) throw new Error('محیطِ پروژه پیدا نشد.');
+  if (!envId) throw new Error('محیط پروژه پیدا نشد.');
 
-  await sendMsg(tgToken, chatId, '📦 گروهِ ساخته شد؛ در حالِ اتصال به مخزنِ پنل…');
+  await sendMsg(tgToken, chatId, '📦 پروژه ساخته شد؛ در حال اتصال به مخزن…');
 
-  // 3) ساختِ سرویس از مخزِنِ گیت‌هاب (public repo)
+  // ۳) سرویس از مخزن
   const srvName = cf.prefix + '-' + Math.random().toString(36).slice(2, 6);
-  const sv = await gql(userToken,
-    `mutation($s:ServiceCreateInput!){ serviceCreate(input:$s){ id name } }`,
-    { s: { name: srvName, projectId, environmentId, source: { repo: cf.repo }, branch: cf.branch } });
+  const sv = await gql(userToken, 'mutation($s:ServiceCreateInput!){ serviceCreate(input:$s){ id name } }', { s: { name: srvName, projectId, environmentId: envId, source: { repo: cf.repo }, branch: cf.branch } });
   const serviceId = sv.serviceCreate && sv.serviceCreate.id;
-  if (!serviceId) throw new Error('ساختِ سرویس ناموفق بود.');
+  if (!serviceId) throw new Error('ساخت سرویس ناموفق بود.');
 
-  await sendMsg(tgToken, chatId, '🔗 سرویس متصل شد؛ در حالِ افزودنِ متغیرِ محیطی…');
+  // ۴) متغیر محیطی (غیرکشنده)
+  try { await gql(userToken, 'mutation($e:String!,$v:EnvironmentVariables){ variableCollectionUpsert(input:{ environmentId:$e, variables:$v }) }', { e: envId, v: { ADMIN_USER: 'admin' } }); } catch (_) {}
 
-  // 4) افزودنِ متغیرِ محیطی لازم برای پنل (اختیاری/نیمه‌الزامی)
-  try {
-    await gql(userToken,
-      'mutation($e:String!,$v:EnvironmentVariables){ variableCollectionUpsert(input:{ environmentId:$e, variables:$v }) }',
-      { e: environmentId, v: { ADMIN_USER: 'admin' } });
-  } catch (e) { /* غیرِ کشنده */ }
-
-  // 5) ساختِ دامنه‌ی عمومی (up.railway.app)
-  const dm = await gql(userToken,
-    'mutation($e:String!,$s:String!){ serviceDomainCreate(input:{ environmentId:$e, serviceId:$s }){ id domain } }',
-    { e: environmentId, s: serviceId });
+  // ۵) دامنه
+  const dm = await gql(userToken, 'mutation($e:String!,$s:String!){ serviceDomainCreate(input:{ environmentId:$e, serviceId:$s }){ id domain } }', { e: envId, s: serviceId });
   let domain = dm.serviceDomainCreate && dm.serviceDomainCreate.domain;
   if (Array.isArray(domain)) domain = domain[0];
 
-  await sendMsg(tgToken, chatId, '🌐 دامنه‌ی عمومی آماده شد؛ در حالِ آغازِ استقرار…');
-
-  // 6) آغازِ استقرار
-  let deployId = null;
+  // ۶) آغاز استقرار
+  let deploymentId = null;
   try {
-    const dep = await gql(userToken,
-      'mutation($s:String!,$e:String!){ serviceInstanceDeployV2(serviceId:$s, environmentId:$e) }',
-      { s: serviceId, e: environmentId });
-    deployId = dep && dep.serviceInstanceDeployV2;
-  } catch (e) { /* شاید استقرار خودکار با سرویس آغاز شود */ }
+    const dep = await gql(userToken, 'mutation($s:String!,$e:String!){ serviceInstanceDeployV2(serviceId:$s, environmentId:$e) }', { s: serviceId, e: envId });
+    deploymentId = dep && dep.serviceInstanceDeployV2;
+  } catch (_) {}
 
-  return {
-    projectId, projectName: projName, environmentId, serviceId, deployId, domain,
-    email: email, hostname: (domain || projName + '.' + cf.domSuf),
-  };
+  return { projectId, projectName: projName, environmentId: envId, serviceId, deploymentId, domain, email, hostname: (domain || projName + '.' + cf.domSuf) };
 }
 
-// ---------------------------------------------------------------------------
-// صفحه‌ی «در حالِ ساخت»: هم پیامِ شروع، هم در پایان لینکِ کامل را می‌دهد
-// ---------------------------------------------------------------------------
-async function deliverPanel(info, tgToken, chatId) {
-  await sendMsg(tgToken, chatId,
-    '🚀 <b>پنلِ تو در حالِ ساخت است!</b>\n\n' +
-    '🔗 آدرسِ پنل (به‌محضِ آماده‌شدن فعال می‌شود):\n<b>' + info.hostname + '</b>\n\n' +
-    'نکته: اولین استقرار ممکن است ۱ تا ۵ دقیقه طول بکشد. آدرسِ بالا را بعداً باز کنید تا پنلِ «تخت جمشید» را ببینید.\n\n' +
-    '🔑 ورودِ پیش‌فرض: <code>admin</code> / <code>admin123</code>\n' +
-    '⚙️ پس از ورود حتماً رمز را در «تنظیمات» تغییر دهید.');
+// --- پولِ وضعیت استقرار ---
+async function pollDeployment(userToken, deploymentId) {
+  if (!deploymentId) return { status: 'UNKNOWN', detail: 'شناسه استقرار موجود نیست.' };
+  try {
+    const d = await gql(userToken, 'query($id:String!){ deployment(id:$id){ id status createdAt } }', { id: deploymentId });
+    const dep = d.deployment || {};
+    return { status: dep.status || 'UNKNOWN', createdAt: dep.createdAt };
+  } catch (e) {
+    return { status: 'ERROR', detail: e.message };
+  }
 }
 
-// ---------------------------------------------------------------------------
-// پردازشِ پیام‌های تلگرام
-// ---------------------------------------------------------------------------
+// ===========================================================================
+//  پردازشِ پیام‌ها و کلیک‌ها
+// ===========================================================================
 async function handleMessage(token, msg, envObj) {
   const chatId = msg.chat.id;
   const text = (msg.text || '').trim();
-  const from = msg.from;
-  const uid = String(from && from.id ? from.id : chatId);
-  const first = from && from.first_name ? from.first_name : 'کاربر';
+  const from = msg.from; const uid = String(from ? from.id : chatId);
+  const cf = cfg(envObj); const kv = envObj.KV;
 
-  if (text === '/start' || text === '/help' || text === '🏛 شروع' || text === '/راهنما') {
-    return sendMsg(token, chatId,
-      '🏛 <b>' + BOT_NAME + '</b>\n\n' +
-      'این ربات با گرفتنِ <b>Account Token</b> ریلیو، روی حسابِ <b>خودِ تو</b> یک پنلِ «تخت جمشید» (FastAPI) می‌سازد و لینکِ آن را می‌دهد.\n\n' +
-      '👇 برای شروع، توکنِ ریلیو را همین‌جا بفرست:\n<code>token_xxxxxxxx</code> یا <code>uuid</code>\n\n' +
-      '🔒 توکن فقط برای ساختِ پنل استفاده می‌شود و در هیچ‌جا ذخیره نمی‌گردد.',
-      [['🏛 شروع'], ['📖 دریافت توکن'], ['ℹ️ راهنما']]);
+  // دستورِ وضعیت (تشخیص با /status یا کلیکِ status)
+  if (text === '/status' || text === '🧪 بررسی وضعیت استقرار' || text.startsWith('/status ')) {
+    let depId = text.split(' ')[1] || null;
+    if (!depId) depId = await getK(kv, 'dep:' + chatId);
+    if (!depId) return sendMsg(token, chatId, 'هنوز استقراری ندارید. ابتدا یک توکن بفرستید.', kb.main);
+    const userToken = await getK(kv, 'rtok:' + chatId);
+    if (!userToken) return sendMsg(token, chatId, 'توکن ذخیره نشده؛ دوباره توکن را بفرستید.', kb.main);
+    const st = await pollDeployment(userToken, depId);
+    let label = { PENDING: '🕓 در صف', BUILDING: '⚙️ در حال ساخت', DEPLOYING: '🚀 در حال استقرار', SUCCEEDED: '✅ تکمیل شد', FAILED: '❌ ناموفق', CANCELLED: '⏹ لغو شد', UNKNOWN: '❓ نامشخص', ERROR: '⚠️ خطا' }[st.status] || st.status;
+    return sendMsg(token, chatId, '🧪 وضعیت استقرار: <b>' + label + '</b>' + (st.detail ? '\n<code>' + st.detail + '</code>' : '') + '\n\n(پس از تکمیل، لینک پنل را از همان پیامِ ساخت بردارید یا دوباره بررسی کنید.)', kb.main);
   }
 
-  if (text === '📖 دریافت توکن') {
+  // دانلودِ فایلِ (اختیاری) - نادیده‌گیر
+  if (text === '/start' || text === '🚀 ساخته شود' || text === '🏛 شروع' || text === 'start') {
+    await putK(kv, 'state:' + chatId, 'idle');
     return sendMsg(token, chatId,
-      '🔑 <b>دریافتِ توکنِ ریلیو (Account Token)</b>\n\n' +
-      '۱. برو به <a href="https://railway.com">railway.com</a> و وارد حساب شو.\n' +
-      '۲. از منویِ بالا: <b>Settings → Tokens</b> (یا <a href="https://railway.com/account/tokens">این لینک</a>).\n' +
-      '۳. دکمه‌ی <b>New Token</b> را بزن.\n' +
-      '۴. در کادرِ «Workspace» <b>No workspace</b> را انتخاب کن (این نکته‌ی کلیدی است!).\n' +
-      '۵. یک نام بگذار (مثلاً takht-saz) و Create.\n' +
-      '۶. توکنِ ساخته‌شده را کپی و برایم بفرست.\n\u200e   توجه: تازه‌ترین نسخه‌ی ریلیو توکن را به‌شکلِ <code>UUID</code> می‌دهد (مثل <code>17c1aec5-…</code>) — همین را بفرست، ربات می‌فهمد.\n\n' +
-      '⚠️ این توکن فقط یک‌بار نمایش داده می‌شود؛ همان‌جا کپی‌اش کن.',
-      [['🏛 شروع']]);
+      '🏛 <b>' + BOT_NAME + '</b> (v' + VERSION + ')\n\n' +
+      'این ربات با گرفتنِ <b>Account Token</b> ریلیو، روی حسابِ <b>خودِ تو</b> یک پنلِ «تخت جمشید» (FastAPI) می‌سازد و لینک و QR آن را می‌دهد.\n\n' +
+      '👉 <b>توکن ریلیو</b> را همین‌جا بفرست تا شروع کنیم:\n<code>token_xxxxxxxx</code> یا <code>UUID</code>', kb.main);
   }
 
-  if (text === 'ℹ️ راهنما') {
+  if (text === '📖 دریافت توکن' || text === 'guide') {
     return sendMsg(token, chatId,
-      'ℹ️ <b>راهنما</b>\n\n' +
-      '۱. توکنِ ریلیو را بفرست (<code>token_...</code>).\n' +
-      '۲. ربات روی حسابِ تو پروژه و سرویس می‌سازد و استقرار را آغاز می‌کند.\n' +
-      '۳. لینکِ پنل را تحویل می‌دهد.\n\n' +
-      '🔐 <b>امنیت:</b>\n' +
-      '• توکن از سرورهای تلگرام عبور می‌کند و سپس واردِ Workerِ بات می‌شود.\n' +
-      '• ما آن را ذخیره نمی‌کنیم؛ فقط لحظه‌ای برای فراخوانیِ API ریلیو استفاده می‌شود.\n' +
-      '• پیشنهاد: بعد از پایانِ کار، توکن را از ریلیو باطل (revoke) کن.',
-      [['🏛 شروع']]);
+      '🔑 <b>دریافت توکن ریلیو (Account Token)</b>\n\n' +
+      '۱. وارد <a href="https://railway.com">railway.com</a> شو.\n' +
+      '۲. از منو: <b>Settings → Tokens</b> (یا <a href="https://railway.com/account/tokens">لینک مستقیم</a>).\n' +
+      '۳. <b>New Token</b>\n' +
+      '۴. در «Workspace» گزینه‌ی <b>No workspace</b> (نکته‌ی کلیدی!).\n' +
+      '۵. نام بگذار (مثلاً takht-saz) و Create.\n' +
+      '۶. توکن (فرمت <code>UUID</code> یا <code>token_</code>) را کپی و همین‌جا بفرست.\n\n⚠️ توکن فقط یک‌بار نمایش داده می‌شود.', kb.back);
   }
 
-  // تشخیصِ توکنِ ریلیو در متن (هر دو فرمتِ token_ و UUID)
+  if (text === 'ℹ️ راهنما' || text === 'help') {
+    return sendMsg(token, chatId,
+      'ℹ️ <b>راهنما</b>\n\n• توکن ریلیو را بفرست؛ ربات پروژه/سرویس/دامنه می‌سازد و استقرار را آغاز می‌کند.\n• با «بررسی وضعیت» پیشرفت را ببین؛ پس از تکمیل، لینک و QR پنل تحویل داده می‌شود.\n• ورود پیش‌فرض پنل: <code>admin / admin123</code>\n\n🔐 هرگز توکن را جای دیگری نشر نده و پس از پایانِ کار، آن را از ریلیو باطل کن.', kb.back);
+  }
+
+  // تشخیص توکن
   const userToken = extractRailwayToken(text);
   if (userToken) {
-    const cf = cfg(envObj);
-    const rate = await checkRate(envObj.KV, uid, cf.maxPerH, cf.maxGlobal);
-    if (!rate.ok) return sendMsg(token, chatId, '⛔ ' + rate.msg);
+    const rate = await checkRate(kv, uid, cf.maxPerH, cf.maxGlobal);
+    if (!rate.ok) return sendMsg(token, chatId, '⛔ ' + rate.msg, kb.main);
 
-    await sendMsg(token, chatId, '⚙️ شروعِ ساختِ پنل… (۱ تا ۵ دقیقه)');
+    await sendMsg(token, chatId, '⚙️ شروعِ ساخت_… (۱ تا ۳ دقیقه)');
     try {
       const info = await provision(userToken, chatId, token, cf);
-      await deliverPanel(info, token, chatId);
+      await putK(kv, 'dep:' + chatId, info.deploymentId || 'none');
+      await putK(kv, 'rtok:' + chatId, userToken);
+      await putK(kv, 'host:' + chatId, info.hostname);
+      const link = (info.domain ? '' : 'https://') + info.hostname;
+      const qr = QR_API + encodeURIComponent(link);
+      await sendMsg(token, chatId,
+        '🚀 <b>پنل تو در حال ساخت است!</b>\n\n' +
+        '🔗 آدرس پنل:\n<b>' + link + '</b>\n\n' +
+        '⚙️ اولین استقرار ۱ تا ۵ دقیقه طول می‌کشد. پس از ساخت، این آدرس را باز کن.\n' +
+        '🔑 ورود: <code>admin / admin123</code>\n\n🧪 برای پیگیری، دکمه‌ی «بررسی وضعیت استقرار» را بزن.',
+        kb.main);
+      try {
+        const ph = await tg(token, 'sendPhoto', { chat_id: chatId, photo: qr,
+          caption: '📍 QR کدِ پنل تو — اسکن کن', reply_markup: kb.main });
+        if (!(ph && ph.ok)) {
+          await sendMsg(token, chatId, 'QR: ' + qr, kb.main);
+        }
+      } catch (_) {}
     } catch (e) {
-      await sendMsg(token, chatId, '❌ <b>خطا در ساختِ پنل</b>\n\n' + (e.message || 'نامشخص') +
-        '\n\nمطمئن شو که توکن، <b>Account Token</b> ریلیو باشد (فرمت <code>token_</code> یا <code>UUID</code>) و حسابِ تو دسترسیِ کافی دارد.',
-        [['🏛 شروع'], ['📖 دریافت توکن']]);
+      let msg2 = e.message || 'نامشخص';
+      if (/limit exceeded|upgrade/i.test(msg2)) msg2 = 'حساب ریلیوی تو به سقف ساختِ منابع رسیده (پلن رایگان). یا پلن را ارتقا بده یا از حساب/ورک‌اسپیسِ دیگری استفاده کن.';
+      else if (/workspace/i.test(msg2)) msg2 = 'توکن Account (نه Project Token) و «No workspace» لازم است.';
+      await sendMsg(token, chatId, '❌ <b>خطا در ساختِ پنل</b>\n\n' + msg2, kb.main);
     }
     return;
   }
 
+  // متن ناشناخته
   return sendMsg(token, chatId,
-    'متنِ درست را نفهمیدم. لطفاً توکنِ ریلیو (<code>token_...</code>) را بفرست یا <b>/start</b> را بزن.',
-    [['🏛 شروع'], ['📖 دریافت توکن']]);
+    'متن را نفهمیدم. توکن ریلیو (<code>token_...</code> یا <code>UUID</code>) بفرست یا از منو استفاده کن.', kb.main);
 }
 
-// ---------------------------------------------------------------------------
-// روتر
-// ---------------------------------------------------------------------------
+// --- کلیکِ دکمه‌ها ---
+async function handleCallback(token, cb, envObj) {
+  const chatId = cb.message.chat.id;
+  const mid = cb.message.message_id;
+  const data = cb.data;
+  if (data === 'start') { await editMsg(token, chatId, mid, 'خانه. توکن ریلیو را بفرست.', kb.main); return; }
+  if (data === 'guide') { await editMsg(token, chatId, mid, '🔑 توکن را از railway.com/account/tokens بگیر (No workspace)، سپس بفرست.', kb.back); return; }
+  if (data === 'help') { await editMsg(token, chatId, mid, 'ℹ️ توکن بفرست تا پنل ساخته شود؛ با «بررسی وضعیت» پیگیری کن.', kb.back); return; }
+  if (data === 'status') { await handleMessage(token, { chat: { id: chatId }, text: '/status', from: cb.from }, envObj); return; }
+  tg(token, 'answerCallbackQuery', { callback_query_id: cb.id });
+}
+
+// ===========================================================================
+//  روتر
+// ===========================================================================
 async function handleRequest(request, envObj) {
   const url = new URL(request.url);
   const TELEGRAM_TOKEN = envObj.TELEGRAM_TOKEN || '';
   const WEBHOOK_SECRET = env('WEBHOOK_SECRET', 'tj', envObj);
 
   if (url.pathname === '/health') return json({ ok: true, name: BOT_NAME, version: VERSION });
-  if (url.pathname === '/') return json({ ok: true, message: 'تخت‌ساز Railway در حال اجراست. مسیرِ وب‌هوک: /tg/<secret>' });
+  if (url.pathname === '/') return json({ ok: true, message: 'تخت‌ساز Railway در حال اجراست. مسیر وب‌هوک /tg/<secret>' });
 
-  // راه‌اندازیِ وب‌هوک (GET)
   if (url.pathname === '/setup' && request.method === 'GET') {
-    const r = await tg(TELEGRAM_TOKEN, 'setWebhook', {
-      url: url.origin + '/tg/' + WEBHOOK_SECRET, secret_token: WEBHOOK_SECRET, allowed_updates: ['message'],
-    });
+    const r = await tg(TELEGRAM_TOKEN, 'setWebhook', { url: url.origin + '/tg/' + WEBHOOK_SECRET, secret_token: WEBHOOK_SECRET, allowed_updates: ['message', 'callback_query'] });
     return json({ ok: !!(r && r.ok), result: r });
   }
 
-  // وب‌هوکِ تلگرام
   if (url.pathname.startsWith('/tg/') && request.method === 'POST') {
     const supplied = url.pathname.slice(4);
     if (WEBHOOK_SECRET && supplied !== WEBHOOK_SECRET) return json({ ok: false }, 403);
     const body = await request.json().catch(() => ({}));
     if (body && body.message) await handleMessage(TELEGRAM_TOKEN, body.message, envObj);
+    else if (body && body.callback_query) await handleCallback(TELEGRAM_TOKEN, body.callback_query, envObj);
     return json({ ok: true }, 200);
   }
 
@@ -303,9 +283,6 @@ async function handleRequest(request, envObj) {
 export default {
   async fetch(request, envObj, ctx) {
     try { return await handleRequest(request, envObj); }
-    catch (e) {
-      console.error(e);
-      return json({ ok: false, error: String(e && e.message || e) }, 500);
-    }
+    catch (e) { console.error(e); return json({ ok: false, error: String(e && e.message || e) }, 500); }
   },
 };
